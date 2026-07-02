@@ -234,6 +234,18 @@ def parse_reset(text, ref):
     return target
 
 
+def dismiss_dialog(pane_id, dry):
+    """Pass the "What do you want to do?" usage-limit dialog. Enter confirms
+    the default first option ("Stop and wait for limit to reset"), which only
+    dismisses the dialog; at a plain prompt Enter is a no-op, so this is safe
+    when the user already passed it by hand."""
+    if dry:
+        log.info("[dry-run] would send Enter (pass limit dialog) -> %s", pane_id)
+        return
+    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    log.info("sent Enter to pass limit dialog -> %s", pane_id)
+
+
 def send_resume(pane_id, message, dry):
     if dry:
         log.info("[dry-run] would send-keys -> %s: %r", pane_id, message)
@@ -268,10 +280,12 @@ def tick(state, args, now):
                 continue
             fire = reset + timedelta(seconds=args.buffer)
             pending[pane_id] = {"epi": epi, "reset": reset, "fire": fire,
-                                "branch": st.get("branch"), "file": str(sf)}
+                                "branch": st.get("branch"), "file": str(sf),
+                                "attempts": 0}
             log.info("DETECTED limit: %s [%s] resets %s -> resume %s", pane_id,
                      st.get("branch"), reset.isoformat(timespec="minutes"),
                      fire.isoformat(timespec="minutes"))
+            dismiss_dialog(pane_id, args.dry_run)
         elif pane_id in pending:
             log.info("%s resolved externally, cancelling", pane_id)
             del pending[pane_id]
@@ -287,10 +301,27 @@ def tick(state, args, now):
                 log.info("%s no longer blocked at fire time, skipping", pane_id)
                 del pending[pane_id]
                 continue
-            log.info("RESUMING %s [%s]", pane_id, p["branch"])
+            log.info("RESUMING %s [%s] (attempt %d)", pane_id, p["branch"],
+                     p["attempts"] + 1)
             send_resume(pane_id, args.message, args.dry_run)
-            done.add(p["epi"])
-            del pending[pane_id]
+            if args.dry_run:
+                done.add(p["epi"])
+                del pending[pane_id]
+                continue
+            time.sleep(2)  # let claude write the user turn before we confirm
+            if sf.exists() and not session_status(sf).get("blocked"):
+                done.add(p["epi"])
+                del pending[pane_id]
+                continue
+            p["attempts"] += 1
+            if p["attempts"] >= 3:
+                log.error("%s resume never landed after %d attempts, giving up",
+                          pane_id, p["attempts"])
+                done.add(p["epi"])
+                del pending[pane_id]
+            else:
+                log.warning("%s resume did not land (dialog ate it?), retrying next tick",
+                            pane_id)
 
 
 def cmd_list(now):

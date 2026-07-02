@@ -19,6 +19,17 @@ Detection and resume use different channels, each picked for what it does best:
   newest `*.jsonl` under `~/.claude/projects/<munged-cwd>/` (claude does not hold
   the fd open, so `lsof` is only a best-effort hint). Resume is
   `tmux send-keys` into that pane.
+- **Pass the limit dialog (tmux).** Hitting the limit first shows a modal
+  "What do you want to do?" menu (`Stop and wait for limit to reset` / `Ask
+  your admin for more usage`). That menu swallows typed text, so a resume
+  message sent into it would be lost. On detection the watcher sends a single
+  Enter, confirming the default "Stop and wait" option, which just dismisses
+  the menu and leaves the `resets 6pm` message on a normal prompt. At a plain
+  prompt (dialog already passed by hand) that Enter is a no-op.
+- **Confirm the resume landed.** After sending the message, the transcript is
+  re-read to confirm a user turn arrived. If something still swallowed it, the
+  send is retried on later ticks (up to 3 attempts) instead of being marked
+  done and silently stranding the session.
 
 There is no Claude Code hook that fires on a usage-limit stop, and the status
 line's `rate_limits` block is Pro/Max-only and not reachable from a daemon, so
@@ -30,9 +41,10 @@ Every `--interval` seconds:
 
 1. Find all live claude panes and their active session files.
 2. If a session's last real turn is a `rate_limit` stop, schedule a resume for
-   `reset + buffer`.
-3. When a scheduled time arrives, re-confirm the session is still blocked, then
-   send the resume message. A session you resumed by hand is dropped.
+   `reset + buffer` and send one Enter to pass the limit dialog.
+3. When a scheduled time arrives, re-confirm the session is still blocked, send
+   the resume message, then verify it landed in the transcript (retrying next
+   tick if not). A session you resumed by hand is dropped.
 
 The `buffer` (default 60s) matters: resuming a few seconds early just trips the
 limit again, so it fires slightly after the reset boundary.
